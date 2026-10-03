@@ -1,0 +1,33 @@
+[package]
+name = "sootmark-syslog"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Linux syslog files (classic, RFC 3339 and RFC 5424 lines): entries with honest times (years inferred and marked), and what sshd, sudo, cron and account tools recorded."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Sootmark/syslog"
+homepage = "https://sootmark.com"
+keywords = ["forensics", "dfir", "incident-response", "linux", "syslog"]
+# Sources only: test fixtures stay in the repository.
+include = ["/src", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
+
+[lib]
+name = "syslog"
+
+[dependencies]
+common = { package = "sootmark-common", version = "0.3.5" }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
