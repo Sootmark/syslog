@@ -53,8 +53,15 @@ impl Event {
 /// What `entry` records, when its program and message say.
 #[must_use]
 pub fn classify(entry: &Entry) -> Option<Event> {
-    let program = entry.program.as_deref()?;
-    let message = entry.message.trim();
+    classify_message(entry.program.as_deref()?, &entry.message)
+}
+
+/// What a message from `program` records: for messages read elsewhere
+/// than a syslog file, such as the systemd journal (`SYSLOG_IDENTIFIER`
+/// and `MESSAGE`).
+#[must_use]
+pub fn classify_message(program: &str, message: &str) -> Option<Event> {
+    let message = message.trim();
     let name = program.rsplit('/').next().unwrap_or(program);
     match name {
         "sshd" | "sshd-session" => sshd(message),
@@ -242,6 +249,24 @@ fn account(program: &str, message: &str) -> Option<Event> {
 mod tests {
     use super::*;
     use crate::{parse, Context};
+
+    #[test]
+    fn messages_read_elsewhere() {
+        let event = classify_message(
+            "sshd-session",
+            "Accepted publickey for deploy from 10.0.0.9 port 51515 ssh2: ED25519 SHA256:abc",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                event.action,
+                event.user.as_deref(),
+                event.source_ip.as_deref()
+            ),
+            ("ssh login", Some("deploy"), Some("10.0.0.9"))
+        );
+        assert_eq!(classify_message("systemd", "Started session"), None);
+    }
 
     fn event(line: &str) -> Option<Event> {
         classify(&parse(line.as_bytes(), Context::default()).entries[0])

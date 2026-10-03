@@ -24,9 +24,9 @@ for entry in &parsed.entries {
   - **RFC 3339** (rsyslog's high-precision default, `2020-05-31T00:00:45.698463+00:00 host …`), in UTC; ChromeOS's severity word in place of the host is kept as `level`.
   - **RFC 5424** (`<14>1 2021-03-06T04:07:38+00:00 host app procid msgid [sd] msg`): priority (facility and severity), message id, structured data skipped.
 - Host, program, pid and message; lines without a host or a tag are read too; continuation lines are joined to their message. A line that looks like a timestamp but isn't one is reported in `problems`, never fatal.
-- `auth::classify(entry)`: sshd logins, failed logins (invalid user flagged), invalid users, connections and disconnects, with the account, address (IPv6 normalised), port, method and key fingerprint; sudo (account, target, command), su, cron commands, PAM sessions opened, and accounts added, deleted, changed (group membership) and passwords changed.
+- `auth::classify(entry)`: sshd logins, failed logins (invalid user flagged), invalid users, connections and disconnects, with the account, address (IPv6 normalised), port, method and key fingerprint; sudo (account, target, command), su, cron commands, PAM sessions opened, and accounts added, deleted, changed (group membership) and passwords changed. `auth::classify_message(program, message)` does the same for messages read elsewhere, such as the systemd journal.
 
-Not yet: the systemd journal (binary), and syslog's network forward format written to a file.
+Not yet: syslog's network forward format written to a file.
 
 ## How it's checked
 

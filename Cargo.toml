@@ -1,6 +1,6 @@
 [package]
 name = "sootmark-syslog"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.80"
 description = "Linux syslog files (classic, RFC 3339 and RFC 5424 lines): entries with honest times (years inferred and marked), and what sshd, sudo, cron and account tools recorded."
