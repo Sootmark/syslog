@@ -248,7 +248,7 @@ checksum = "bafd4296b9b9d7da9946442ba093f0c53362ae32d0e8f9b6d8497902ca5c5307"
 
 [[package]]
 name = "sootmark-syslog"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "sootmark-common",

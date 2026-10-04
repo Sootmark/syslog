@@ -4,7 +4,7 @@ Linux syslog files (`/var/log/syslog`, `messages`, `auth.log`, `secure`, `kern.l
 
 ```toml
 [dependencies]
-sootmark-syslog = "0.1"
+sootmark-syslog = "0.2"
 ```
 
 ```rust
@@ -24,7 +24,7 @@ for entry in &parsed.entries {
   - **RFC 3339** (rsyslog's high-precision default, `2020-05-31T00:00:45.698463+00:00 host …`), in UTC; ChromeOS's severity word in place of the host is kept as `level`, and so is VMware ESXi's severity marker (`In(166)`, spelled out; ESXi 6's `info hostd[…]` too).
   - **RFC 5424** (`<14>1 2021-03-06T04:07:38+00:00 host app procid msgid [sd] msg`): priority (facility and severity), message id, structured data skipped.
 - Host, program, pid and message; lines without a host or a tag are read too; continuation lines are joined to their message. A line that looks like a timestamp but isn't one is reported in `problems`, never fatal.
-- `auth::classify(entry)`: sshd logins, failed logins (invalid user flagged), invalid users, connections and disconnects, with the account, address (IPv6 normalised), port, method and key fingerprint; sudo (account, target, command), su, cron commands, PAM sessions opened, and accounts added, deleted, changed (group membership) and passwords changed; on VMware ESXi, the commands typed in its shell (`shell.log`) and vSphere logins, successful and failed (`hostd`). `auth::classify_message(program, message)` does the same for messages read elsewhere, such as the systemd journal.
+- `auth::classify(entry)`: sshd logins, failed logins (invalid user flagged), invalid users, connections and disconnects, with the account, address (IPv6 normalised), port, method and key fingerprint; sudo (account, target, command), su, cron commands, PAM sessions opened, and accounts added, deleted, changed (group membership) and passwords changed; on VMware ESXi, the commands typed in its shell (`shell.log`), vSphere logins, successful and failed, the tasks run on virtual machines (`vim.VirtualMachine.powerOff`, with who asked) and their power-state transitions with the machine's `.vmx` path (`hostd`), and SSH or the ESXi Shell turned on (`vobd`): what ransomware operators do before encrypting the datastores. `auth::classify_message(program, message)` does the same for messages read elsewhere, such as the systemd journal.
 
 Not yet: syslog's network forward format written to a file.
 

@@ -1,9 +1,10 @@
 //! What authentication and account programs recorded: sshd's logins,
 //! failures and connections, sudo's commands, su, cron's jobs, and the
 //! account tools (`useradd`, `userdel`, `usermod`, `groupadd`, `passwd`,
-//! `chpasswd`); on ESXi, the commands typed in its shell (`shell.log`) and
-//! the logins through vSphere (`hostd`). Messages these patterns don't
-//! cover stay plain entries.
+//! `chpasswd`); on ESXi, the commands typed in its shell (`shell.log`), the
+//! logins through vSphere, the tasks run on virtual machines and their
+//! power states (`hostd`), and SSH or the ESXi Shell turned on (`vobd`).
+//! Messages these patterns don't cover stay plain entries.
 
 use crate::{address, Entry};
 
@@ -13,7 +14,9 @@ pub struct Event {
     /// `ssh login`, `ssh failed login`, `ssh invalid user`, `ssh connection`,
     /// `ssh disconnect`, `sudo`, `su`, `cron command`, `session opened`,
     /// `user added`, `user deleted`, `user changed`, `group added`,
-    /// `password changed`.
+    /// `password changed`; on ESXi, `esxi command`, `vsphere login`,
+    /// `vsphere failed login`, `esxi task`, `vm state`, `esxi ssh enabled`,
+    /// `esxi shell enabled`.
     pub action: &'static str,
     /// The account acted as (the one logging in, running sudo, …).
     pub user: Option<String>,
@@ -33,6 +36,12 @@ pub struct Event {
     pub command: Option<String>,
     /// The group (account tools).
     pub group: Option<String>,
+    /// What was acted on that isn't an account: on ESXi, the virtual
+    /// machine (its `.vmx` path).
+    pub target: Option<String>,
+    /// A state reached: on ESXi, a virtual machine's power state
+    /// (`VM_STATE_ON -> VM_STATE_POWERING_OFF`).
+    pub state: Option<String>,
 }
 
 impl Event {
@@ -48,6 +57,8 @@ impl Event {
             invalid_user: false,
             command: None,
             group: None,
+            target: None,
+            state: None,
         }
     }
 }
@@ -75,6 +86,7 @@ pub fn classify_message(program: &str, message: &str) -> Option<Event> {
         }
         _ if name.eq_ignore_ascii_case("shell") => esxi_shell(message),
         _ if name.eq_ignore_ascii_case("hostd") => hostd(message),
+        _ if name.eq_ignore_ascii_case("vobd") => vobd(message),
         _ => pam_session(message),
     }
 }
@@ -92,8 +104,66 @@ fn esxi_shell(message: &str) -> Option<Event> {
 /// ESXi's management service: logins through the vSphere API or client,
 /// `… Event 112 : User root@198.51.100.7 logged in as VMware-client/6.5.0`,
 /// and refused ones (`Cannot login root@…`, `Rejected password for user
-/// root from …`).
+/// root from …`); tasks and virtual machines' power states.
 fn hostd(message: &str) -> Option<Event> {
+    hostd_login(message).or_else(|| hostd_vm(message))
+}
+
+/// A task run (`Task Created : haTask-12-vim.VirtualMachine.powerOff-110732`)
+/// or a virtual machine's power state changed (`State Transition
+/// (VM_STATE_ON -> VM_STATE_POWERING_OFF)`), with who asked and which
+/// machine, from the bracketed header (`[Originator@6876
+/// sub=Vmsvc.vm:/vmfs/volumes/…/dc01.vmx opID=… user=root]`).
+fn hostd_vm(message: &str) -> Option<Event> {
+    let (header, text) = message
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .unwrap_or(("", message));
+    let setting = |name: &str| {
+        header
+            .split(' ')
+            .find_map(|part| part.strip_prefix(name)?.strip_prefix('='))
+            .filter(|value| !value.is_empty())
+    };
+    let mut event = if let Some(task) = text.trim().strip_prefix("Task Created : ") {
+        // haTask-<n>-<method>-<id>: the method between the first two parts
+        // and the last.
+        let method = task.splitn(3, '-').nth(2)?.rsplit_once('-')?.0;
+        let mut event = Event::new("esxi task");
+        event.command = Some(method.to_owned());
+        event
+    } else if let Some(states) = text.trim().strip_prefix("State Transition (") {
+        let mut event = Event::new("vm state");
+        event.state = Some(states.strip_suffix(')')?.to_owned());
+        event.target = setting("sub")
+            .and_then(|sub| sub.strip_prefix("Vmsvc.vm:"))
+            .map(str::to_owned);
+        event
+    } else {
+        return None;
+    };
+    event.user = setting("user").map(str::to_owned);
+    Some(event)
+}
+
+/// ESXi's observer: SSH or the ESXi Shell turned on (`[UserLevelCorrelator]
+/// … [esx.audit.ssh.enabled] SSH access has been enabled.`).
+fn vobd(message: &str) -> Option<Event> {
+    if !message.contains("enabled") {
+        return None;
+    }
+    let action = if message.contains("esx.audit.ssh.enabled") || message.contains("SSH access") {
+        "esxi ssh enabled"
+    } else if message.contains("esx.audit.shell.enabled") || message.contains("ESXi Shell") {
+        "esxi shell enabled"
+    } else {
+        return None;
+    };
+    Some(Event::new(action))
+}
+
+/// A login through vSphere, refused or not.
+fn hostd_login(message: &str) -> Option<Event> {
     let (action, who) = if let Some(at) = message
         .find("User ")
         .filter(|_| message.contains(" logged in"))
@@ -353,6 +423,49 @@ mod tests {
         assert_eq!(rejected.action, "vsphere failed login");
         assert_eq!(
             event("2023-04-10T08:16:41Z In(14) shell[2101]: Interactive shell session started"),
+            None
+        );
+    }
+
+    #[test]
+    fn esxi_vm_tasks_states_and_services() {
+        let task = event("2023-02-03T10:12:01.123Z info hostd[2099566] [Originator@6876 sub=Vimsvc.TaskManager opID=esxui-1a2b-3c4d user=root] Task Created : haTask-12-vim.VirtualMachine.powerOff-110732").unwrap();
+        assert_eq!(
+            (task.action, task.user.as_deref(), task.command.as_deref()),
+            (
+                "esxi task",
+                Some("root"),
+                Some("vim.VirtualMachine.powerOff")
+            )
+        );
+        let state = event("2023-02-03T10:12:01.456Z In(166) Hostd[2099567]: [Originator@6876 sub=Vmsvc.vm:/vmfs/volumes/63d0f2a1-5e6b7c8d/dc01/dc01.vmx opID=esxui-1a2b-3c4d user=vpxuser] State Transition (VM_STATE_ON -> VM_STATE_POWERING_OFF)").unwrap();
+        assert_eq!(
+            (
+                state.action,
+                state.user.as_deref(),
+                state.target.as_deref(),
+                state.state.as_deref()
+            ),
+            (
+                "vm state",
+                Some("vpxuser"),
+                Some("/vmfs/volumes/63d0f2a1-5e6b7c8d/dc01/dc01.vmx"),
+                Some("VM_STATE_ON -> VM_STATE_POWERING_OFF")
+            )
+        );
+        let ssh = event("2023-02-03T10:10:00.000Z In(14) vobd[2097695]: [UserLevelCorrelator] 2341ms: [esx.audit.ssh.enabled] SSH access has been enabled.").unwrap();
+        assert_eq!(ssh.action, "esxi ssh enabled");
+        let shell = event(
+            "2024-12-12T01:45:06.064Z info vobd[71471]: [UserLevelCorrelator] ESXi Shell enabled",
+        )
+        .unwrap();
+        assert_eq!(shell.action, "esxi shell enabled");
+        assert_eq!(
+            event("2023-02-03T10:10:00.000Z In(14) vobd[2097695]: [UserLevelCorrelator] SSH access has been disabled."),
+            None
+        );
+        assert_eq!(
+            event("2023-02-03T10:12:02.000Z info hostd[2099566] [Originator@6876 sub=Vimsvc.TaskManager user=root] Task Completed : haTask-12-vim.VirtualMachine.powerOff-110732 Status success"),
             None
         );
     }
