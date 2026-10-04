@@ -1,7 +1,9 @@
 //! What authentication and account programs recorded: sshd's logins,
 //! failures and connections, sudo's commands, su, cron's jobs, and the
 //! account tools (`useradd`, `userdel`, `usermod`, `groupadd`, `passwd`,
-//! `chpasswd`). Messages these patterns don't cover stay plain entries.
+//! `chpasswd`); on ESXi, the commands typed in its shell (`shell.log`) and
+//! the logins through vSphere (`hostd`). Messages these patterns don't
+//! cover stay plain entries.
 
 use crate::{address, Entry};
 
@@ -71,8 +73,52 @@ pub fn classify_message(program: &str, message: &str) -> Option<Event> {
         "useradd" | "userdel" | "usermod" | "groupadd" | "passwd" | "chpasswd" => {
             account(name, message)
         }
+        _ if name.eq_ignore_ascii_case("shell") => esxi_shell(message),
+        _ if name.eq_ignore_ascii_case("hostd") => hostd(message),
         _ => pam_session(message),
     }
+}
+
+/// ESXi's `shell.log`: `[root]: esxcli network firewall set --enabled
+/// false`, a command typed in the ESXi shell, and who typed it.
+fn esxi_shell(message: &str) -> Option<Event> {
+    let (user, command) = message.strip_prefix('[')?.split_once("]: ")?;
+    let mut event = Event::new("esxi command");
+    event.user = Some(user.to_owned()).filter(|u| !u.is_empty());
+    event.command = Some(command.trim().to_owned()).filter(|c| !c.is_empty());
+    event.command.is_some().then_some(event)
+}
+
+/// ESXi's management service: logins through the vSphere API or client,
+/// `… Event 112 : User root@198.51.100.7 logged in as VMware-client/6.5.0`,
+/// and refused ones (`Cannot login root@…`, `Rejected password for user
+/// root from …`).
+fn hostd(message: &str) -> Option<Event> {
+    let (action, who) = if let Some(at) = message
+        .find("User ")
+        .filter(|_| message.contains(" logged in"))
+    {
+        ("vsphere login", message[at + 5..].split(' ').next()?)
+    } else if let Some(at) = message.find("Cannot login ") {
+        (
+            "vsphere failed login",
+            message[at + 13..].split(' ').next()?,
+        )
+    } else if let Some(at) = message.find("Rejected password for user ") {
+        let rest = &message[at + 27..];
+        let (user, after) = rest.split_once(" from ")?;
+        let mut event = Event::new("vsphere failed login");
+        event.user = Some(user.to_owned());
+        event.source_ip = after.split(' ').next().and_then(address);
+        return Some(event);
+    } else {
+        return None;
+    };
+    let (user, ip) = who.rsplit_once('@')?;
+    let mut event = Event::new(action);
+    event.user = Some(user.to_owned());
+    event.source_ip = address(ip);
+    Some(event)
 }
 
 /// `… from <address> port <n>…`: the address and the port.
@@ -266,6 +312,67 @@ mod tests {
             ("ssh login", Some("deploy"), Some("10.0.0.9"))
         );
         assert_eq!(classify_message("systemd", "Started session"), None);
+    }
+
+    #[test]
+    fn esxi_shell_and_vsphere_logins() {
+        for line in [
+            "2023-04-10T08:15:02.123Z In(14) shell[2101]: [root]: esxcli network firewall set --enabled false",
+            "2023-04-10T08:15:02Z shell[2101]: [root]: esxcli network firewall set --enabled false",
+        ] {
+            let shell = event(line).unwrap();
+            assert_eq!(
+                (shell.action, shell.user.as_deref(), shell.command.as_deref()),
+                (
+                    "esxi command",
+                    Some("root"),
+                    Some("esxcli network firewall set --enabled false")
+                ),
+                "{line}"
+            );
+        }
+        let login = event("2023-04-10T08:16:40.010Z In(166) Hostd[2099566]: [Originator@6876 sub=Vimsvc.ha-eventmgr] Event 112 : User root@198.51.100.7 logged in as VMware-client/6.5.0").unwrap();
+        assert_eq!(
+            (
+                login.action,
+                login.user.as_deref(),
+                login.source_ip.as_deref()
+            ),
+            ("vsphere login", Some("root"), Some("198.51.100.7"))
+        );
+        let failed = event("2023-04-10T08:16:39.001Z info hostd[2099566] [Originator@6876 sub=Vimsvc.ha-eventmgr] Event 111 : Cannot login root@198.51.100.7").unwrap();
+        assert_eq!(
+            (
+                failed.action,
+                failed.user.as_deref(),
+                failed.source_ip.as_deref()
+            ),
+            ("vsphere failed login", Some("root"), Some("198.51.100.7"))
+        );
+        let rejected = event("2023-04-10T08:16:38.500Z Wa(164) Hostd[2099566]: Rejected password for user root from 198.51.100.7").unwrap();
+        assert_eq!(rejected.action, "vsphere failed login");
+        assert_eq!(
+            event("2023-04-10T08:16:41Z In(14) shell[2101]: Interactive shell session started"),
+            None
+        );
+    }
+
+    #[test]
+    fn esxi_markers_set_the_level() {
+        let entry = &parse(
+            b"2023-04-10T08:15:02.123Z Wa(180) vmkwarning: cpu3:2097 WARNING: x\n",
+            Context::default(),
+        )
+        .entries[0];
+        assert_eq!(
+            (
+                entry.level.as_deref(),
+                entry.priority,
+                entry.program.as_deref(),
+                entry.host.as_deref()
+            ),
+            (Some("warning"), Some(180), Some("vmkwarning"), None)
+        );
     }
 
     fn event(line: &str) -> Option<Event> {

@@ -40,6 +40,8 @@ const SEVERITY_WORDS: [&str; 8] = [
     "EMERG", "ALERT", "CRIT", "ERR", "ERROR", "WARNING", "NOTICE", "INFO",
 ];
 const DEBUG: &str = "DEBUG";
+/// ESXi 6's level words, before a tag without its colon.
+const ESXI6_WORDS: [&str; 5] = ["verbose", "info", "warning", "error", "debug"];
 
 /// What the file's metadata says, for what its lines don't.
 #[derive(Debug, Clone, Copy, Default)]
@@ -54,7 +56,8 @@ pub struct Context {
 pub enum Format {
     /// `Mar 11 22:55:31 …`: no year, no zone.
     Classic,
-    /// `2020-05-31T00:00:45.698463+00:00 …`.
+    /// `2020-05-31T00:00:45.698463+00:00 …`; ESXi's lines too
+    /// (`2023-04-10T08:15:02.123Z In(14) shell[2101]: …`).
     Rfc3339,
     /// `<14>1 2021-03-06T04:07:38+00:00 …`.
     Rfc5424,
@@ -85,7 +88,8 @@ pub struct Entry {
     pub program: Option<String>,
     /// The process id, when written.
     pub pid: Option<u32>,
-    /// A severity word written in place of the host (ChromeOS).
+    /// A severity word written in place of the host (ChromeOS), or ESXi's
+    /// severity marker (`In(14)`) spelled out.
     pub level: Option<String>,
     /// RFC 5424's message id.
     pub message_id: Option<String>,
@@ -430,20 +434,60 @@ fn tail(rest: &str, entry: &mut Entry) {
         after.trim_start().clone_into(&mut entry.message);
         return;
     }
-    if SEVERITY_WORDS.contains(&first) || first == DEBUG {
+    if let Some((level, priority)) = esxi_severity(first) {
+        // ESXi writes no host: its marker, then the tag.
+        entry.level = Some(level.to_owned());
+        entry.priority = entry.priority.or(Some(priority));
+        tail(after, entry);
+        return;
+    }
+    let after = after.trim_start_matches(' ');
+    let (second, message) = after.split_once(' ').unwrap_or((after, ""));
+    // ESXi 6 writes a lowercase level word and `hostd[2099566]`, without a
+    // colon.
+    let esxi6 = ESXI6_WORDS
+        .contains(&first)
+        .then(|| bare_tag(second))
+        .flatten();
+    if SEVERITY_WORDS.contains(&first) || first == DEBUG || esxi6.is_some() {
         entry.level = Some(first.to_owned());
     } else {
         entry.host = Some(first.to_owned());
     }
-    let after = after.trim_start_matches(' ');
-    let (second, message) = after.split_once(' ').unwrap_or((after, ""));
-    if let Some((program, pid)) = tag(second) {
+    if let Some((program, pid)) = tag(second).or(esxi6) {
         entry.program = Some(program);
         entry.pid = pid;
         message.trim_start().clone_into(&mut entry.message);
     } else {
         after.clone_into(&mut entry.message);
     }
+}
+
+/// ESXi's severity marker (`In(166)`): its level, and the priority in
+/// brackets.
+fn esxi_severity(word: &str) -> Option<(&'static str, u8)> {
+    let (code, rest) = word.split_at_checked(2)?;
+    let priority = rest.strip_prefix('(')?.strip_suffix(')')?.parse().ok()?;
+    let level = match code {
+        "Em" => "emergency",
+        "Al" => "alert",
+        "Cr" => "critical",
+        "Er" => "error",
+        "Wa" => "warning",
+        "No" => "notice",
+        "In" => "info",
+        "Db" => "debug",
+        _ => return None,
+    };
+    Some((level, priority))
+}
+
+/// `program[pid]`, its pid a number.
+fn bare_tag(word: &str) -> Option<(String, Option<u32>)> {
+    let (program, pid) = word.strip_suffix(']')?.split_once('[')?;
+    let pid = pid.parse().ok()?;
+    let valid = !program.is_empty() && !program.contains([':', ']']);
+    valid.then(|| (program.to_owned(), Some(pid)))
 }
 
 /// `program[pid]:` or `program:`.
